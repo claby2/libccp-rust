@@ -5,3 +5,8 @@ authors = ["Akshay Narayan <akshayn@mit.edu>"]
 edition = "2018"
 
 [dependencies]
+failure = "0.1"
+time = "0.1"
+
+[build-dependencies]
+bindgen = "0.43.0"
