@@ -8,12 +8,10 @@ fn main() {
         .current_dir("./libccp")
         .spawn()
         .expect("libccp make failed");
-    libccp_make
-        .wait()
-        .expect("libccp make spawned but failed");
+    libccp_make.wait().expect("libccp make spawned but failed");
 
     println!("cargo:rustc-link-search=./libccp");
-    println!("cargo:rustc-link-lib=ccp");
+    println!("cargo:rustc-link-lib=static=ccp");
 
     let bindings = bindgen::Builder::default()
         .header("./libccp/ccp.h")
