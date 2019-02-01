@@ -1,5 +1,9 @@
 //! Rust bindings for [libccp](https://github.com/ccp-project/libccp).
 //! This crate is useful for writing CCP datapaths in Rust.
+//!
+//! Users need to implement two traits: `Datapath` and `CongestionOps`.
+//! `Datapath` implements not specific to a single connection.
+//! `CongestionOps` implements connection-level events.
 
 /// Bindgen-generated libccp bindings.
 #[allow(non_upper_case_globals)]
@@ -13,12 +17,13 @@ use failure::bail;
 extern crate time;
 
 pub trait Datapath {
+    /// How should libccp communicate with the CCP congestion control algorithm?
     fn send_msg(&mut self, msg: &[u8]);
 }
 
 struct DatapathObj(Box<Datapath>);
 
-extern "C" fn bundler_send_msg(
+extern "C" fn send_msg(
     dp: *mut ccp::ccp_datapath,
     _conn: *mut ccp::ccp_connection,
     msg: *mut ::std::os::raw::c_char,
@@ -44,92 +49,37 @@ extern "C" fn bundler_send_msg(
     return 0;
 }
 
-pub trait CongestionOps {
-    fn set_cwnd(&mut self, cwnd: u32);
-    fn set_rate_abs(&mut self, rate: u32);
-    fn set_rate_rel(&mut self, rate: u32);
-}
-
-struct ConnectionObj(Box<CongestionOps>);
-
-extern "C" fn bundler_set_cwnd(
-    _dp: *mut ccp::ccp_datapath,
-    conn: *mut ccp::ccp_connection,
-    cwnd: u32,
-) {
-    // get the impl ConnectionObj
-    let mut conn: Box<ConnectionObj> = unsafe {
-        use std::mem;
-        let conn = mem::transmute((*conn).impl_);
-        Box::from_raw(conn)
+/// When the datapath receives an IPC message from the congestion
+/// control algorithm, call this function to tell libccp about it.
+pub fn recv_msg(msg: &mut [u8]) -> Result<(), failure::Error> {
+    let buf_len = msg.len();
+    let ok = unsafe {
+        ccp::ccp_read_msg(
+            msg.as_mut_ptr() as *mut std::os::raw::c_char,
+            buf_len as i32,
+        )
     };
 
-    conn.0.set_cwnd(cwnd);
+    if ok < 0 {
+        bail!("ccp_read_msg failed with {:?}", ok);
+    }
 
-    // "leak" the Box because *mut ccp::ccp_datapath still owns it
-    Box::leak(conn);
+    Ok(())
 }
 
-extern "C" fn bundler_set_rate_abs(
-    _dp: *mut ccp::ccp_datapath,
-    conn: *mut ccp::ccp_connection,
-    rate: u32,
-) {
-    // get the impl ConnectionObj
-    let mut conn: Box<ConnectionObj> = unsafe {
-        use std::mem;
-        let conn = mem::transmute((*conn).impl_);
-        Box::from_raw(conn)
-    };
-
-    conn.0.set_rate_abs(rate);
-
-    // "leak" the Box because *mut ccp::ccp_datapath still owns it
-    Box::leak(conn);
-}
-
-extern "C" fn bundler_set_rate_rel(
-    _dp: *mut ccp::ccp_datapath,
-    conn: *mut ccp::ccp_connection,
-    rate: u32,
-) {
-    // get the impl ConnectionObj
-    let mut conn: Box<ConnectionObj> = unsafe {
-        use std::mem;
-        let conn = mem::transmute((*conn).impl_);
-        Box::from_raw(conn)
-    };
-
-    conn.0.set_rate_rel(rate);
-
-    // "leak" the Box because *mut ccp::ccp_datapath still owns it
-    Box::leak(conn);
-}
-
-extern "C" fn bundler_now() -> u64 {
-    time::precise_time_ns()
-}
-
-extern "C" fn bundler_since_usecs(then: u64) -> u64 {
-    time::precise_time_ns() - then
-}
-
-extern "C" fn bundler_after_usecs(usecs: u64) -> u64 {
-    time::precise_time_ns() + usecs * 1_000
-}
-
+/// Initialize libccp and pass it an implementation of `Datapath` functionality.
 pub fn init_with_datapath<T: Datapath + 'static>(dp: T) -> Result<(), failure::Error> {
     // need 2 levels of Box so we can avoid passing a fat pointer down
     let dp = Box::new(DatapathObj(Box::new(dp)));
     let mut dp = ccp::ccp_datapath {
-        set_cwnd: Some(bundler_set_cwnd),
-        set_rate_abs: Some(bundler_set_rate_abs),
-        set_rate_rel: Some(bundler_set_rate_rel),
+        set_cwnd: Some(ccp::set_cwnd),
+        set_rate_abs: Some(ccp::set_rate_abs),
+        set_rate_rel: Some(ccp::set_rate_rel),
         time_zero: time::precise_time_ns(),
-        now: Some(bundler_now),
-        since_usecs: Some(bundler_since_usecs),
-        after_usecs: Some(bundler_after_usecs),
-        send_msg: Some(bundler_send_msg),
+        now: Some(ccp::now),
+        since_usecs: Some(ccp::since_usecs),
+        after_usecs: Some(ccp::after_usecs),
+        send_msg: Some(send_msg),
         impl_: Box::into_raw(dp) as *mut std::os::raw::c_void,
     };
 
@@ -141,9 +91,19 @@ pub fn init_with_datapath<T: Datapath + 'static>(dp: T) -> Result<(), failure::E
     Ok(())
 }
 
+/// Call this function only if you will no longer use libccp.
+/// It will de-allocate libccp's internal state.
 pub fn deinit() {
     unsafe { ccp::ccp_free() }
 }
+
+///
+pub trait CongestionOps {
+    fn set_cwnd(&mut self, cwnd: u32);
+    fn set_rate_abs(&mut self, rate: u32);
+}
+
+struct ConnectionObj(Box<CongestionOps>);
 
 pub struct FlowInfo(ccp::ccp_datapath_info);
 
@@ -258,6 +218,7 @@ impl Primitives {
 pub struct Connection(*mut ccp::ccp_connection);
 
 impl Connection {
+    /// Call this function when a connection starts.
     pub fn start(conn: Box<CongestionOps>, flow_info: FlowInfo) -> Result<Self, failure::Error> {
         let conn_obj = Box::new(ConnectionObj(conn));
         let conn = unsafe {
@@ -274,6 +235,7 @@ impl Connection {
         Ok(Connection(conn))
     }
 
+    /// Call this function when a connection ends.
     pub fn end(self) {
         unsafe {
             let index = (*(self.0)).index;
@@ -281,6 +243,7 @@ impl Connection {
         }
     }
 
+    /// Inform libccp of new measurements.
     pub fn load_primitives(&mut self, prims: Primitives) {
         unsafe {
             (*(self.0)).prims.bytes_acked = prims.0.bytes_acked;
@@ -302,27 +265,15 @@ impl Connection {
         }
     }
 
+    /// Tell libccp to invoke. This will run the congestion control's datapath program,
+    /// and potentially result in calls to the `CongestionOps` callbacks.
+    /// Therefore, ensure that when you call this function, you are not holding locks that
+    /// the `CongestionOps` functionality tries to acquire - this will deadlock.
     pub fn invoke(&mut self) {
         unsafe {
             ccp::ccp_invoke(self.0);
         }
     }
-}
-
-pub fn recv_msg(msg: &mut [u8]) -> Result<(), failure::Error> {
-    let buf_len = msg.len();
-    let ok = unsafe {
-        ccp::ccp_read_msg(
-            msg.as_mut_ptr() as *mut std::os::raw::c_char,
-            buf_len as i32,
-        )
-    };
-
-    if ok < 0 {
-        bail!("ccp_read_msg failed with {:?}", ok);
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -357,10 +308,6 @@ mod tests {
 
         fn set_rate_abs(&mut self, rate: u32) {
             self.curr_rate = rate;
-        }
-
-        fn set_rate_rel(&mut self, _rate: u32) {
-            unimplemented!()
         }
     }
 
