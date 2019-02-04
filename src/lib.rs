@@ -144,6 +144,11 @@ impl Connection {
         }
     }
 
+    pub fn primitives(&self) -> Primitives {
+        let pr = unsafe { &(*(self.0)).prims };
+        pr.into()
+    }
+
     /// Tell libccp to invoke. This will run the congestion control's datapath program,
     /// and potentially result in calls to the `CongestionOps` callbacks.
     /// Therefore, ensure that when you call this function, you are not holding locks that
