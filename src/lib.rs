@@ -33,32 +33,6 @@ pub trait Datapath {
 
 struct DatapathObj(Box<Datapath>);
 
-extern "C" fn send_msg(
-    dp: *mut ccp::ccp_datapath,
-    _conn: *mut ccp::ccp_connection,
-    msg: *mut ::std::os::raw::c_char,
-    msg_size: ::std::os::raw::c_int,
-) -> std::os::raw::c_int {
-    // get the impl CcpDatapath
-    let mut dp: Box<DatapathObj> = unsafe {
-        use std::mem;
-        let dp = mem::transmute((*dp).impl_);
-        Box::from_raw(dp)
-    };
-
-    // construct the slice
-    use std::slice;
-    let buf = unsafe { slice::from_raw_parts(msg as *mut u8, msg_size as usize) };
-
-    // send the message using the provided impl
-    dp.0.send_msg(buf);
-
-    // "leak" the Box because *mut ccp::ccp_datapath still owns it
-    Box::leak(dp);
-
-    return 0;
-}
-
 /// When the datapath receives an IPC message from the congestion
 /// control algorithm, call this function to tell libccp about it.
 pub fn recv_msg(msg: &mut [u8]) -> Result<(), failure::Error> {
@@ -89,7 +63,7 @@ pub fn init_with_datapath<T: Datapath + 'static>(dp: T) -> Result<(), failure::E
         now: Some(ccp::now),
         since_usecs: Some(ccp::since_usecs),
         after_usecs: Some(ccp::after_usecs),
-        send_msg: Some(send_msg),
+        send_msg: Some(ccp::send_msg),
         impl_: Box::into_raw(dp) as *mut std::os::raw::c_void,
     };
 
@@ -107,7 +81,6 @@ pub fn deinit() {
     unsafe { ccp::ccp_free() }
 }
 
-///
 pub trait CongestionOps {
     fn set_cwnd(&mut self, cwnd: u32);
     fn set_rate_abs(&mut self, rate: u32);
