@@ -153,10 +153,14 @@ impl Connection {
     /// and potentially result in calls to the `CongestionOps` callbacks.
     /// Therefore, ensure that when you call this function, you are not holding locks that
     /// the `CongestionOps` functionality tries to acquire - this will deadlock.
-    pub fn invoke(&mut self) {
-        unsafe {
-            ccp::ccp_invoke(self.0);
+    pub fn invoke(&mut self) -> Result<(), failure::Error> {
+        let ok = unsafe { ccp::ccp_invoke(self.0) };
+
+        if ok < 0 {
+            bail!("CCP Invoke error: {:?}", ok);
         }
+
+        Ok(())
     }
 }
 
