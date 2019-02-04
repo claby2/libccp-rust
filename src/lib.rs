@@ -5,6 +5,14 @@
 //! `Datapath` implements not specific to a single connection.
 //! `CongestionOps` implements connection-level events.
 
+// Made necessary by use of `mashup!`.
+// https://github.com/dtolnay/mashup/issues/19
+// Need +22 recursion_limit per struct field.
+// The longest struct in this crate is `Primitives` with 15 fields, so
+// we need recursion_limit >= 330 + some large constant.
+// So we pick 512.
+#![recursion_limit = "512"]
+
 /// Bindgen-generated libccp bindings.
 #[allow(non_upper_case_globals)]
 #[allow(non_camel_case_types)]
@@ -14,6 +22,8 @@ mod ccp;
 
 extern crate failure;
 use failure::bail;
+#[macro_use]
+extern crate mashup;
 extern crate time;
 
 pub trait Datapath {
@@ -105,115 +115,26 @@ pub trait CongestionOps {
 
 struct ConnectionObj(Box<CongestionOps>);
 
-pub struct FlowInfo(ccp::ccp_datapath_info);
+macro_rules! setters {
+    ( $s:ident => $($x: ident : $t: ty),+ ) => {
+        mashup! { $(
+            m["fname" $x] = with_ $x;
+        )* }
 
-impl Default for FlowInfo {
-    fn default() -> Self {
-        FlowInfo(ccp::ccp_datapath_info {
-            init_cwnd: 10,
-            mss: 1460,
-            src_ip: 0,
-            src_port: 0,
-            dst_ip: 0,
-            dst_port: 0,
-            congAlg: [0i8; 64],
-        })
-    }
+        m! {
+        impl $s { $(
+            pub fn "fname" $x (mut self, val: $t) -> Self { (self.0).$x = val; self }
+        )*
+	}
+	}
+    };
 }
 
-impl FlowInfo {
-    pub fn with_init_cwnd(mut self, init_cwnd: u32) -> Self {
-        self.0.init_cwnd = init_cwnd;
-        self
-    }
+mod flow_info;
+mod primitives;
 
-    pub fn with_mss(mut self, mss: u32) -> Self {
-        self.0.mss = mss;
-        self
-    }
-
-    pub fn with_src(mut self, src: u32) -> Self {
-        self.0.src_ip = src;
-        self
-    }
-
-    pub fn with_src_port(mut self, src: u32) -> Self {
-        self.0.src_port = src;
-        self
-    }
-
-    pub fn with_dst(mut self, dst: u32) -> Self {
-        self.0.dst_ip = dst;
-        self
-    }
-
-    pub fn with_dst_port(mut self, dst: u32) -> Self {
-        self.0.dst_port = dst;
-        self
-    }
-
-    pub fn with_four_tuple(self, src_ip: u32, src_port: u32, dst_ip: u32, dst_port: u32) -> Self {
-        self.with_src(src_ip)
-            .with_src_port(src_port)
-            .with_dst(dst_ip)
-            .with_dst_port(dst_port)
-    }
-
-    fn get_dp_info(&self) -> ccp::ccp_datapath_info {
-        ccp::ccp_datapath_info {
-            init_cwnd: self.0.init_cwnd,
-            mss: self.0.mss,
-            src_ip: self.0.src_ip,
-            src_port: self.0.src_port,
-            dst_ip: self.0.dst_ip,
-            dst_port: self.0.dst_port,
-            congAlg: self.0.congAlg,
-        }
-    }
-}
-
-pub struct Primitives(ccp::ccp_primitives);
-
-impl Default for Primitives {
-    fn default() -> Self {
-        Primitives(ccp::ccp_primitives {
-            bytes_acked: 0,
-            packets_acked: 0,
-            bytes_misordered: 0,
-            packets_misordered: 0,
-            ecn_bytes: 0,
-            ecn_packets: 0,
-            lost_pkts_sample: 0,
-            was_timeout: false,
-            rtt_sample_us: 0,
-            rate_outgoing: 0,
-            rate_incoming: 0,
-            bytes_in_flight: 0,
-            packets_in_flight: 0,
-            snd_cwnd: 0,
-            snd_rate: 0,
-            bytes_pending: 0,
-        })
-    }
-}
-
-impl Primitives {
-    pub fn with_bytes_acked(mut self, bytes_acked: u32) -> Self {
-        self.0.bytes_acked = bytes_acked;
-        self
-    }
-
-    pub fn with_bytes_misordered(mut self, bytes_misordered: u32) -> Self {
-        self.0.bytes_misordered = bytes_misordered;
-        self
-    }
-
-    pub fn with_rate(mut self, rate_outgoing: u64, rate_incoming: u64) -> Self {
-        self.0.rate_outgoing = rate_outgoing;
-        self.0.rate_incoming = rate_incoming;
-        self
-    }
-}
+pub use crate::flow_info::FlowInfo;
+pub use crate::primitives::Primitives;
 
 pub struct Connection(*mut ccp::ccp_connection);
 
@@ -246,22 +167,7 @@ impl Connection {
     /// Inform libccp of new measurements.
     pub fn load_primitives(&mut self, prims: Primitives) {
         unsafe {
-            (*(self.0)).prims.bytes_acked = prims.0.bytes_acked;
-            (*(self.0)).prims.packets_acked = prims.0.packets_acked;
-            (*(self.0)).prims.bytes_misordered = prims.0.bytes_misordered;
-            (*(self.0)).prims.packets_misordered = prims.0.packets_misordered;
-            (*(self.0)).prims.ecn_bytes = prims.0.ecn_bytes;
-            (*(self.0)).prims.ecn_packets = prims.0.ecn_packets;
-            (*(self.0)).prims.lost_pkts_sample = prims.0.lost_pkts_sample;
-            (*(self.0)).prims.was_timeout = prims.0.was_timeout;
-            (*(self.0)).prims.rtt_sample_us = prims.0.rtt_sample_us;
-            (*(self.0)).prims.rate_outgoing = prims.0.rate_outgoing;
-            (*(self.0)).prims.rate_incoming = prims.0.rate_incoming;
-            (*(self.0)).prims.bytes_in_flight = prims.0.bytes_in_flight;
-            (*(self.0)).prims.packets_in_flight = prims.0.packets_in_flight;
-            (*(self.0)).prims.snd_cwnd = prims.0.snd_cwnd;
-            (*(self.0)).prims.snd_rate = prims.0.snd_rate;
-            (*(self.0)).prims.bytes_pending = prims.0.bytes_pending;
+            (*(self.0)).prims = prims.0;
         }
     }
 
