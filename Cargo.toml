@@ -1,7 +1,13 @@
 [package]
-name = "libccp-rust"
-version = "0.1.0"
+name = "libccp"
+version = "0.0.1"
 authors = ["Akshay Narayan <akshayn@mit.edu>"]
+description = "Rust bindings for libccp, a library for implementing CCP-compatible datapaths"
+homepage = "https://ccp-project.github.io"
+documentation = "https://docs.rs/libccp"
+repository = "https://github.com/akshayknarayan/libccp-rust"
+readme = "./README.md"
+license = "ISC"
 edition = "2018"
 
 [dependencies]
