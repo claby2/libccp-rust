@@ -285,7 +285,7 @@ mod tests {
 
         recv_msg(&mut install_basic).unwrap();
         recv_msg(&mut changeprog_msg).unwrap();
-        c.invoke();
+        c.invoke().unwrap();
 
         c.end();
         free_dp();
