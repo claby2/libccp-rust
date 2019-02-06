@@ -3,6 +3,7 @@ include!(concat!(env!("OUT_DIR"), "/libccp.rs"));
 
 use super::DatapathObj;
 
+#[no_mangle]
 pub extern "C" fn send_msg(
     dp: *mut ccp_datapath,
     _conn: *mut ccp_connection,
@@ -31,6 +32,7 @@ pub extern "C" fn send_msg(
 
 use super::ConnectionObj;
 
+#[no_mangle]
 pub extern "C" fn set_cwnd(_dp: *mut ccp_datapath, conn: *mut ccp_connection, cwnd: u32) {
     // get the impl ConnectionObj
     let mut conn: Box<ConnectionObj> = unsafe {
@@ -45,6 +47,7 @@ pub extern "C" fn set_cwnd(_dp: *mut ccp_datapath, conn: *mut ccp_connection, cw
     Box::leak(conn);
 }
 
+#[no_mangle]
 pub extern "C" fn set_rate_abs(_dp: *mut ccp_datapath, conn: *mut ccp_connection, rate: u32) {
     // get the impl ConnectionObj
     let mut conn: Box<ConnectionObj> = unsafe {
@@ -59,18 +62,22 @@ pub extern "C" fn set_rate_abs(_dp: *mut ccp_datapath, conn: *mut ccp_connection
     Box::leak(conn);
 }
 
+#[no_mangle]
 pub extern "C" fn set_rate_rel(_dp: *mut ccp_datapath, conn: *mut ccp_connection, rate: u32) {
     // do nothing, this method is deprecated
 }
 
+#[no_mangle]
 pub extern "C" fn now() -> u64 {
     time::precise_time_ns()
 }
 
+#[no_mangle]
 pub extern "C" fn since_usecs(then: u64) -> u64 {
     time::precise_time_ns() - then
 }
 
+#[no_mangle]
 pub extern "C" fn after_usecs(usecs: u64) -> u64 {
     time::precise_time_ns() + usecs * 1_000
 }
