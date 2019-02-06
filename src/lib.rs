@@ -26,37 +26,47 @@ use failure::bail;
 extern crate mashup;
 extern crate time;
 
-pub trait Datapath {
+/// Datapath-wide functionality.
+/// ```
+/// struct Dp(std::os::unix::net::UnixDatagram);
+/// impl libccp::DatapathOps for Dp {
+///     fn send_msg(&mut self, msg: &[u8]) {
+///         self.0.send(msg).unwrap_or_else(|_| (0));
+///     }
+/// }
+/// ```
+pub trait DatapathOps {
     /// How should libccp communicate with the CCP congestion control algorithm?
+    /// An `impl Datapath` should contain some IPC strategy, and transmit `msg` via that.
     fn send_msg(&mut self, msg: &[u8]);
 }
 
-struct DatapathObj(Box<Datapath>);
+struct DatapathObj(Box<DatapathOps>);
 
-/// When the datapath receives an IPC message from the congestion
-/// control algorithm, call this function to tell libccp about it.
-pub fn recv_msg(msg: &mut [u8]) -> Result<(), failure::Error> {
-    let buf_len = msg.len();
-    let ok = unsafe {
-        ccp::ccp_read_msg(
-            msg.as_mut_ptr() as *mut std::os::raw::c_char,
-            buf_len as i32,
-        )
-    };
+pub struct Datapath(i8);
 
-    if ok < 0 {
-        bail!("ccp_read_msg failed with {:?}", ok);
+impl Datapath {
+    /// When the datapath receives an IPC message from the congestion
+    /// control algorithm, call this function to tell libccp about it.
+    pub fn recv_msg(&mut self, msg: &mut [u8]) -> Result<(), failure::Error> {
+        let buf_len = msg.len();
+        let ok = unsafe {
+            ccp::ccp_read_msg(
+                msg.as_mut_ptr() as *mut std::os::raw::c_char,
+                buf_len as i32,
+            )
+        };
+
+        if ok < 0 {
+            bail!("ccp_read_msg failed with {:?}", ok);
+        }
+
+        Ok(())
     }
-
-    Ok(())
 }
 
-pub struct DatapathInitialized(i8);
-
 /// Initialize libccp and pass it an implementation of `Datapath` functionality.
-pub fn init_with_datapath<T: Datapath + 'static>(
-    dp: T,
-) -> Result<DatapathInitialized, failure::Error> {
+pub fn init_with_datapath<T: DatapathOps + 'static>(dp: T) -> Result<Datapath, failure::Error> {
     // need 2 levels of Box so we can avoid passing a fat pointer down
     let dp = Box::new(DatapathObj(Box::new(dp)));
     let mut dp = ccp::ccp_datapath {
@@ -72,16 +82,21 @@ pub fn init_with_datapath<T: Datapath + 'static>(
     };
 
     let ok = unsafe { ccp::ccp_init(&mut dp) };
-    if ok < 0 {
-        bail!("Could not initialize ccp datapath");
-    }
+    match ok {
+        i if i >= 0 => (),    // ok
+        -1 => unreachable!(), // ccp_init checks that we didn't pass null function pointers in with `dp`, but we didn't
+        -2 => bail!("Cannot initialize libccp twice"),
+        -3 | -4 | -5 => bail!("Could not alloc"),
+        i if i < -5 => unreachable!(), // ccp_init only returns error codes -1 | -2 | -3 | -4 | -5
+        _ => unreachable!(), // because rust can't figure out that (i < -5 | -5 | -4 | -3 | -2 | -1 | i >= 0) is exhaustive
+    };
 
-    Ok(DatapathInitialized(0))
+    Ok(Datapath(0))
 }
 
 /// Call this function only if you will no longer use libccp.
 /// It will de-allocate libccp's internal state.
-pub fn deinit(_: DatapathInitialized) {
+pub fn deinit(_: Datapath) {
     unsafe { ccp::ccp_free() }
 }
 
@@ -151,11 +166,7 @@ impl<T: CongestionOps + 'static> Connection<T> {
     /// You *must* call `init_with_datapath` *before* this. To enforce this,
     /// you must pass in a token, `DatapathInitialized`, which only that function
     /// can give you.
-    pub fn start(
-        token: &DatapathInitialized,
-        conn: T,
-        flow_info: FlowInfo,
-    ) -> Result<Self, failure::Error> {
+    pub fn start(token: &Datapath, conn: T, flow_info: FlowInfo) -> Result<Self, failure::Error> {
         if token.0 != 0 {
             bail!("Must initialize datapath (init_with_datapath) before Connection::start");
         }
@@ -232,7 +243,7 @@ mod tests {
         expected_msgs: Vec<Option<Vec<u8>>>,
     }
 
-    impl Datapath for Dp {
+    impl DatapathOps for Dp {
         fn send_msg(&mut self, msg: &[u8]) {
             if self.expected_msgs.is_empty() {
                 return;
@@ -262,16 +273,16 @@ mod tests {
         }
     }
 
-    fn make_dp(expected_msgs: Vec<Option<Vec<u8>>>) -> DatapathInitialized {
+    fn make_dp(expected_msgs: Vec<Option<Vec<u8>>>) -> Datapath {
         let dp = Dp { expected_msgs };
         init_with_datapath(dp).unwrap()
     }
 
-    fn free_dp(d: DatapathInitialized) {
+    fn free_dp(d: Datapath) {
         deinit(d)
     }
 
-    fn make_conn(d: &DatapathInitialized) -> Connection<Cn> {
+    fn make_conn(d: &Datapath) -> Connection<Cn> {
         let cn = Cn {
             curr_cwnd: 19,
             curr_rate: 89,
@@ -292,7 +303,7 @@ mod tests {
         let basic_prog_uid = 4;
 
         #[rustfmt::skip]
-        let dp = make_dp(vec![
+        let mut dp = make_dp(vec![
             Some(vec![ //  close msg
                 0x01, 0,
                 16, 0,
@@ -348,8 +359,8 @@ mod tests {
             0, 0, 0, 0,                                     // extra fields
         ];
 
-        recv_msg(&mut install_basic).unwrap();
-        recv_msg(&mut changeprog_msg).unwrap();
+        dp.recv_msg(&mut install_basic).unwrap();
+        dp.recv_msg(&mut changeprog_msg).unwrap();
         c.invoke().unwrap();
 
         c.end();
