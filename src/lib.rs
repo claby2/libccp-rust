@@ -51,8 +51,12 @@ pub fn recv_msg(msg: &mut [u8]) -> Result<(), failure::Error> {
     Ok(())
 }
 
+pub struct DatapathInitialized(i8);
+
 /// Initialize libccp and pass it an implementation of `Datapath` functionality.
-pub fn init_with_datapath<T: Datapath + 'static>(dp: T) -> Result<(), failure::Error> {
+pub fn init_with_datapath<T: Datapath + 'static>(
+    dp: T,
+) -> Result<DatapathInitialized, failure::Error> {
     // need 2 levels of Box so we can avoid passing a fat pointer down
     let dp = Box::new(DatapathObj(Box::new(dp)));
     let mut dp = ccp::ccp_datapath {
@@ -72,21 +76,45 @@ pub fn init_with_datapath<T: Datapath + 'static>(dp: T) -> Result<(), failure::E
         bail!("Could not initialize ccp datapath");
     }
 
-    Ok(())
+    Ok(DatapathInitialized(0))
 }
 
 /// Call this function only if you will no longer use libccp.
 /// It will de-allocate libccp's internal state.
-pub fn deinit() {
+pub fn deinit(_: DatapathInitialized) {
     unsafe { ccp::ccp_free() }
 }
 
+/// Implement this trait on the type that holds
+/// per-connection state.
+/// ```
+/// struct Cn {
+///     curr_cwnd: u32,
+///     curr_rate: u32,
+/// }
+///
+/// impl libccp::CongestionOps for Cn {
+///     fn set_cwnd(&mut self, cwnd: u32) {
+///         self.curr_cwnd = cwnd;
+///     }
+///
+///     fn set_rate_abs(&mut self, rate: u32) {
+///         self.curr_rate = rate;
+///     }
+/// }
+/// ```
 pub trait CongestionOps {
     fn set_cwnd(&mut self, cwnd: u32);
     fn set_rate_abs(&mut self, rate: u32);
 }
 
-struct ConnectionObj(Box<CongestionOps>);
+impl CongestionOps {
+    fn downcast_mut<T: CongestionOps>(&mut self) -> &mut T {
+        unsafe { &mut *(self as *mut Self as *mut T) }
+    }
+}
+
+struct ConnectionObj(Box<dyn CongestionOps>);
 
 macro_rules! setters {
     ( $s:ident => $($x: ident : $t: ty),+ ) => {
@@ -109,12 +137,32 @@ mod primitives;
 pub use crate::flow_info::FlowInfo;
 pub use crate::primitives::Primitives;
 
-pub struct Connection(*mut ccp::ccp_connection);
+pub struct Connection<T: CongestionOps + 'static>(
+    *mut ccp::ccp_connection,
+    Box<ConnectionObj>,
+    std::marker::PhantomData<T>,
+);
 
-impl Connection {
+impl<T: CongestionOps + 'static> Connection<T> {
     /// Call this function when a connection starts.
-    pub fn start(conn: Box<CongestionOps>, flow_info: FlowInfo) -> Result<Self, failure::Error> {
-        let conn_obj = Box::new(ConnectionObj(conn));
+    /// `conn: impl CongestionOps` represents per-connection state,
+    /// and how to mutate it in response to changing congestion windows
+    /// or rates.
+    /// You *must* call `init_with_datapath` *before* this. To enforce this,
+    /// you must pass in a token, `DatapathInitialized`, which only that function
+    /// can give you.
+    pub fn start(
+        token: &DatapathInitialized,
+        conn: T,
+        flow_info: FlowInfo,
+    ) -> Result<Self, failure::Error> {
+        if token.0 != 0 {
+            bail!("Must initialize datapath (init_with_datapath) before Connection::start");
+        }
+
+        let conn_obj = Box::new(ConnectionObj(Box::new(conn) as Box<dyn CongestionOps>));
+        let ops_raw_pointer = Box::into_raw(conn_obj);
+        let conn_obj = unsafe { Box::from_raw(ops_raw_pointer.clone()) };
         let conn = unsafe {
             ccp::ccp_connection_start(
                 Box::into_raw(conn_obj) as *mut std::os::raw::c_void,
@@ -126,15 +174,18 @@ impl Connection {
             bail!("Could not initialize connection");
         }
 
-        Ok(Connection(conn))
+        Ok(Connection(
+            conn,
+            unsafe { Box::from_raw(ops_raw_pointer) },
+            Default::default(),
+        ))
     }
 
-    /// Call this function when a connection ends.
-    pub fn end(self) {
-        unsafe {
-            let index = (*(self.0)).index;
-            ccp::ccp_connection_free(index);
-        }
+    /// Get a mutable reference to the T: impl CongestionOps
+    /// that was passed in at the beginning.
+    pub fn conn_state(&mut self) -> &mut T {
+        let y = &mut *(self.1);
+        y.0.downcast_mut::<T>()
     }
 
     /// Inform libccp of new measurements.
@@ -162,6 +213,14 @@ impl Connection {
 
         Ok(())
     }
+
+    /// Call this function when a connection ends.
+    pub fn end(self) {
+        unsafe {
+            let index = (*(self.0)).index;
+            ccp::ccp_connection_free(index);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -175,6 +234,10 @@ mod tests {
 
     impl Datapath for Dp {
         fn send_msg(&mut self, msg: &[u8]) {
+            if self.expected_msgs.is_empty() {
+                return;
+            }
+
             let expected_send_msg: Vec<u8> = self.expected_msgs.pop().unwrap().unwrap();
             println!(
                 "this message: {:?}, remaining messsages: {:?}",
@@ -199,19 +262,19 @@ mod tests {
         }
     }
 
-    fn make_dp(expected_msgs: Vec<Option<Vec<u8>>>) {
+    fn make_dp(expected_msgs: Vec<Option<Vec<u8>>>) -> DatapathInitialized {
         let dp = Dp { expected_msgs };
-        init_with_datapath(dp).unwrap();
+        init_with_datapath(dp).unwrap()
     }
 
-    fn free_dp() {
-        deinit()
+    fn free_dp(d: DatapathInitialized) {
+        deinit(d)
     }
 
-    fn make_conn() -> Connection {
+    fn make_conn(d: &DatapathInitialized) -> Connection<Cn> {
         let cn = Cn {
-            curr_cwnd: 0,
-            curr_rate: 0,
+            curr_cwnd: 19,
+            curr_rate: 89,
         };
 
         let fi = FlowInfo::default()
@@ -219,7 +282,9 @@ mod tests {
             .with_mss(10)
             .with_four_tuple(1, 2, 3, 4);
 
-        Connection::start(Box::new(cn), fi).unwrap()
+        let mut c = Connection::start(d, cn, fi).unwrap();
+        assert_eq!(c.conn_state().curr_cwnd, 19);
+        c
     }
 
     #[test]
@@ -227,7 +292,7 @@ mod tests {
         let basic_prog_uid = 4;
 
         #[rustfmt::skip]
-        make_dp(vec![
+        let dp = make_dp(vec![
             Some(vec![ //  close msg
                 0x01, 0,
                 16, 0,
@@ -256,7 +321,7 @@ mod tests {
             ]),
         ]);
 
-        let mut c = make_conn();
+        let mut c = make_conn(&dp);
 
         #[rustfmt::skip]
         let mut install_basic = vec![
@@ -288,7 +353,7 @@ mod tests {
         c.invoke().unwrap();
 
         c.end();
-        free_dp();
+        free_dp(dp);
         return;
     }
 }
