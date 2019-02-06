@@ -79,7 +79,7 @@ impl Datapath {
 
     /// When the datapath receives an IPC message from the congestion
     /// control algorithm, call this function to tell libccp about it.
-    pub fn recv_msg(&mut self, msg: &mut [u8]) -> Result<(), failure::Error> {
+    pub fn recv_msg(&self, msg: &mut [u8]) -> Result<(), failure::Error> {
         let buf_len = msg.len();
         let ok = unsafe {
             ccp::ccp_read_msg(
@@ -143,12 +143,10 @@ macro_rules! setters {
             m["fname" $x] = with_ $x;
         )* }
 
-        m! {
-        impl $s { $(
+        m! { impl $s { $(
             pub fn "fname" $x (mut self, val: $t) -> Self { (self.0).$x = val; self }
         )*
-	}
-	}
+	} }
     };
 }
 
@@ -158,23 +156,48 @@ mod primitives;
 pub use crate::flow_info::FlowInfo;
 pub use crate::primitives::Primitives;
 
-pub struct Connection<T: CongestionOps + 'static>(
+/// An individual Connection.
+/// Connections cannot outlive the `Datapath` they belong to, since they contain
+/// a pointer to memory that is freed when `Datapath` is dropped.
+/// So, their lifetime is `'dp` from the `&'dp Datapath`.
+///
+/// You can regain access to the `impl CongestionOps` by dereferencing `Connection`
+/// ```
+/// struct Dp();
+/// impl libccp::DatapathOps for Dp {
+///     fn send_msg(&mut self, _: &[u8]) { /* ___ */ }
+/// }
+/// struct Cn(u32);
+/// impl libccp::CongestionOps for Cn {
+///     fn set_cwnd(&mut self, cwnd: u32) { /* ___ */ }   
+///     fn set_rate_abs(&mut self, cwnd: u32) { /* ___ */ }   
+/// }
+/// fn main() {
+///     let d = libccp::Datapath::init(Dp()).unwrap();
+///     let mut c = libccp::Connection::start(&d, Cn(0), libccp::FlowInfo::default()).unwrap();
+///     c.load_primitives(libccp::Primitives::default());
+///     c.0 = 1;
+/// }
+/// ```
+pub struct Connection<'dp, T: CongestionOps + 'static>(
     *mut ccp::ccp_connection,
     Box<ConnectionObj>,
+    &'dp Datapath,
     std::marker::PhantomData<T>,
 );
 
-impl<T: CongestionOps + 'static> Connection<T> {
+impl<'dp, T: CongestionOps + 'static> Connection<'dp, T> {
     /// Call this function when a connection starts.
     /// `conn: impl CongestionOps` represents per-connection state,
     /// and how to mutate it in response to changing congestion windows
     /// or rates.
-    /// You *must* call `init_with_datapath` *before* this. To enforce this,
-    /// you must pass in a token, `DatapathInitialized`, which only that function
-    /// can give you.
-    pub fn start(token: &Datapath, conn: T, flow_info: FlowInfo) -> Result<Self, failure::Error> {
+    pub fn start(
+        token: &'dp Datapath,
+        conn: T,
+        flow_info: FlowInfo,
+    ) -> Result<Self, failure::Error> {
         if token.0 != 0 {
-            bail!("Must initialize datapath (init_with_datapath) before Connection::start");
+            unreachable!();
         }
 
         let conn_obj = Box::new(ConnectionObj(Box::new(conn) as Box<dyn CongestionOps>));
@@ -194,6 +217,7 @@ impl<T: CongestionOps + 'static> Connection<T> {
         Ok(Connection(
             conn,
             unsafe { Box::from_raw(ops_raw_pointer) },
+            token,
             Default::default(),
         ))
     }
@@ -205,7 +229,7 @@ impl<T: CongestionOps + 'static> Connection<T> {
         }
     }
 
-    pub fn primitives(&self) -> Primitives {
+    pub fn primitives(&self, _token: &Datapath) -> Primitives {
         let pr = unsafe { &(*(self.0)).prims };
         pr.into()
     }
@@ -225,7 +249,9 @@ impl<T: CongestionOps + 'static> Connection<T> {
     }
 }
 
-impl<T: CongestionOps> Drop for Connection<T> {
+unsafe impl<'dp, T: CongestionOps> Send for Connection<'dp, T> {}
+
+impl<'dp, T: CongestionOps> Drop for Connection<'dp, T> {
     fn drop(&mut self) {
         unsafe {
             let index = (*(self.0)).index;
@@ -234,7 +260,7 @@ impl<T: CongestionOps> Drop for Connection<T> {
     }
 }
 
-impl<T: CongestionOps> std::ops::Deref for Connection<T> {
+impl<'dp, T: CongestionOps> std::ops::Deref for Connection<'dp, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         let y = &*(self.1);
@@ -242,7 +268,7 @@ impl<T: CongestionOps> std::ops::Deref for Connection<T> {
     }
 }
 
-impl<T: CongestionOps> std::ops::DerefMut for Connection<T> {
+impl<'dp, T: CongestionOps> std::ops::DerefMut for Connection<'dp, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         let y = &mut *(self.1);
         y.0.downcast_mut::<T>()
@@ -309,12 +335,188 @@ mod tests {
         c
     }
 
+    use lazy_static::lazy_static;
+    use std::sync::Mutex;
+
+    lazy_static! {
+        static ref TEST_MUTEX: Mutex<()> = Mutex::new(());
+    }
+
+    #[test]
+    fn primitives() {
+        let _l = TEST_MUTEX.lock().unwrap();
+
+        let prims_prog_uid = 5;
+
+        #[rustfmt::skip]
+        let dp = make_dp(vec![
+            Some(vec![ //  close msg
+                0x01, 0,
+                16, 0,
+                0x01, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+            ]),
+            Some(vec![ // report msg
+                0x01, 0x00,                                     // type 
+                0x18, 0x00,                                     // len
+                0x01, 0x00, 0x00, 0x00,                         // sockid
+                prims_prog_uid, 0x00, 0x00, 0x00,               // program_uid
+                0x01, 0x00, 0x00, 0x00,                         // num_fields
+                0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // fields
+            ]),
+            Some(vec![ // create msg
+                0x00,0x00,
+                0x20,0x00,
+                0x01,0x00,0x00,0x00,
+                0x64,0x00,0x00,0x00,
+                0x0a,0x00,0x00,0x00,
+                0x01,0x00,0x00,0x00,
+                0x02,0x00,0x00,0x00,
+                0x03,0x00,0x00,0x00,
+                0x04,0x00,0x00,0x00,
+            ]),
+        ]);
+
+        let mut c = make_conn(&dp);
+
+        #[rustfmt::skip]
+        let mut install_prims = vec![
+            2, 0,                                           // INSTALL                                                     
+            116, 0,                                         // length = 0x74 = 116
+            1, 0, 0, 0,                                     // sock_id = 1                                                 
+            prims_prog_uid, 0, 0, 0,                        // program_uid
+            1, 0, 0, 0,                                     // num_events = 1                                              
+            5, 0, 0, 0,                                     // num_instrs = 5                                              
+            1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, // event { flag-idx=1, num-flag=1, body-idx=2, num-body=3 }
+            2, 5, 0, 0, 0, 0, 5, 0, 0, 0, 0, 1, 0, 0, 0, 0, // (def (volatile Report.foo 0))
+            1, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 1, 0, 0, 0, // (when true
+            0, 7, 0, 0, 0, 0, 5, 0, 0, 0, 0, 4, 0, 0, 0, 0, //      ----------------(+ Report.foo Ack.bytes_acked)
+            1, 5, 0, 0, 0, 0, 5, 0, 0, 0, 0, 7, 0, 0, 0, 0, //     (bind Report.foo ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^)
+            1, 2, 2, 0, 0, 0, 2, 2, 0, 0, 0, 1, 1, 0, 0, 0, //     (bind __shouldReport true)
+        ];
+
+        #[rustfmt::skip]
+        let mut changeprog_msg = vec![
+            4, 0,                                           // type
+            12, 0,                                          // length 
+            1, 0, 0, 0,                                     // sock id
+            prims_prog_uid, 0, 0, 0,                        // program_uid
+            0, 0, 0, 0,                                     // extra fields
+        ];
+
+        dp.recv_msg(&mut install_prims).unwrap();
+        dp.recv_msg(&mut changeprog_msg).unwrap();
+
+        c.load_primitives(
+            Primitives::default()
+                .with_bytes_acked(1)
+                .with_rtt_sample_us(100),
+        );
+        c.invoke().unwrap();
+    }
+
+    #[test]
+    fn primitives_multiple() {
+        let _l = TEST_MUTEX.lock().unwrap();
+
+        let prims_prog_uid = 5;
+
+        #[rustfmt::skip]
+        let close = 
+            Some(vec![ //  close msg
+                0x01, 0,
+                16, 0,
+                0x01, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+            ]);
+
+        #[rustfmt::skip]
+        let report = 
+            Some(vec![ // report msg
+                0x01, 0x00,                                     // type 
+                0x18, 0x00,                                     // len
+                0x01, 0x00, 0x00, 0x00,                         // sockid
+                prims_prog_uid, 0x00, 0x00, 0x00,               // program_uid
+                0x01, 0x00, 0x00, 0x00,                         // num_fields
+                0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // fields
+            ]);
+
+        #[rustfmt::skip]
+        let create = 
+            Some(vec![ // create msg
+                0x00,0x00,
+                0x20,0x00,
+                0x01,0x00,0x00,0x00,
+                0x64,0x00,0x00,0x00,
+                0x0a,0x00,0x00,0x00,
+                0x01,0x00,0x00,0x00,
+                0x02,0x00,0x00,0x00,
+                0x03,0x00,0x00,0x00,
+                0x04,0x00,0x00,0x00,
+            ]);
+
+        let mut msgs = vec![close];
+
+        // 4 reports
+        msgs.push(report.clone());
+        msgs.push(report.clone());
+        msgs.push(report.clone());
+        msgs.push(report);
+
+        msgs.push(create);
+
+        let dp = make_dp(msgs);
+        let mut c = make_conn(&dp);
+
+        #[rustfmt::skip]
+        let mut install_prims = vec![
+            2, 0,                                           // INSTALL                                                     
+            116, 0,                                         // length = 0x74 = 116
+            1, 0, 0, 0,                                     // sock_id = 1                                                 
+            prims_prog_uid, 0, 0, 0,                        // program_uid
+            1, 0, 0, 0,                                     // num_events = 1                                              
+            5, 0, 0, 0,                                     // num_instrs = 5                                              
+            1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, // event { flag-idx=1, num-flag=1, body-idx=2, num-body=3 }
+            2, 5, 0, 0, 0, 0, 5, 0, 0, 0, 0, 1, 0, 0, 0, 0, // (def (volatile Report.foo 0))
+            1, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 1, 0, 0, 0, // (when true
+            0, 7, 0, 0, 0, 0, 5, 0, 0, 0, 0, 4, 0, 0, 0, 0, //      ----------------(+ Report.foo Ack.bytes_acked)
+            1, 5, 0, 0, 0, 0, 5, 0, 0, 0, 0, 7, 0, 0, 0, 0, //     (bind Report.foo ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^)
+            1, 2, 2, 0, 0, 0, 2, 2, 0, 0, 0, 1, 1, 0, 0, 0, //     (bind __shouldReport true)
+        ];
+
+        #[rustfmt::skip]
+        let mut changeprog_msg = vec![
+            4, 0,                                           // type
+            12, 0,                                          // length 
+            1, 0, 0, 0,                                     // sock id
+            prims_prog_uid, 0, 0, 0,                        // program_uid
+            0, 0, 0, 0,                                     // extra fields
+        ];
+
+        dp.recv_msg(&mut install_prims).unwrap();
+        dp.recv_msg(&mut changeprog_msg).unwrap();
+
+        // 4 invokes
+        for _ in 0..4 {
+            c.load_primitives(
+                Primitives::default()
+                    .with_bytes_acked(1)
+                    .with_rtt_sample_us(100),
+            );
+            c.invoke().unwrap();
+        }
+    }
+
     #[test]
     fn basic() {
+        let _l = TEST_MUTEX.lock().unwrap();
+
         let basic_prog_uid = 4;
 
         #[rustfmt::skip]
-        let mut dp = make_dp(vec![
+        let dp = make_dp(vec![
             Some(vec![ //  close msg
                 0x01, 0,
                 16, 0,
