@@ -74,7 +74,7 @@ pub extern "C" fn now() -> u64 {
 
 #[no_mangle]
 pub extern "C" fn since_usecs(then: u64) -> u64 {
-    time::precise_time_ns() - then
+    (time::precise_time_ns() - then) / 1_000
 }
 
 #[no_mangle]
