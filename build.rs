@@ -4,11 +4,23 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    let mut libccp_make = std::process::Command::new("make")
-        .arg("libccp.a")
-        .current_dir("./libccp")
-        .spawn()
-        .expect("libccp make failed");
+    let mut libccp_make = std::process::Command::new("make");
+    libccp_make.arg("libccp.a");
+
+    if cfg!(log_trace) {
+        libccp_make.arg("LOGLEVEL=trace");
+    } else if cfg!(log_debug) {
+        libccp_make.arg("LOGLEVEL=debug");
+    } else if cfg!(log_info) {
+        libccp_make.arg("LOGLEVEL=info");
+    } else if cfg!(log_warn) {
+        libccp_make.arg("LOGLEVEL=warn");
+    } else if cfg!(log_error) {
+        libccp_make.arg("LOGLEVEL=error");
+    }
+
+    libccp_make.current_dir("./libccp");
+    let mut libccp_make = libccp_make.spawn().expect("libccp make failed");
     libccp_make.wait().expect("libccp make spawned but failed");
 
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());

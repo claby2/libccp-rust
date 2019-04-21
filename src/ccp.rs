@@ -30,6 +30,32 @@ pub extern "C" fn send_msg(
     return 0;
 }
 
+#[no_mangle]
+pub extern "C" fn log(dp: *mut ccp_datapath, level: ccp_log_level, msg: *const i8, len: i32) {
+    // get the impl CcpDatapath
+    let mut dp: Box<DatapathObj> = unsafe {
+        use std::mem;
+        let dp = mem::transmute((*dp).impl_);
+        Box::from_raw(dp)
+    };
+
+    // construct the slice
+    use std::slice;
+    let buf = unsafe { slice::from_raw_parts(msg as *mut u8, len as usize) };
+
+    // make a str
+    let msg: &'static str = match std::str::from_utf8(buf) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    // log the str
+    dp.0.log(level, msg);
+
+    // "leak" the Box because *mut ccp::ccp_datapath still owns it
+    Box::leak(dp);
+}
+
 use super::ConnectionObj;
 
 #[no_mangle]
@@ -60,11 +86,6 @@ pub extern "C" fn set_rate_abs(_dp: *mut ccp_datapath, conn: *mut ccp_connection
 
     // "leak" the Box because *mut ccp::ccp_datapath still owns it
     Box::leak(conn);
-}
-
-#[no_mangle]
-pub extern "C" fn set_rate_rel(_dp: *mut ccp_datapath, conn: *mut ccp_connection, rate: u32) {
-    // do nothing, this method is deprecated
 }
 
 #[no_mangle]

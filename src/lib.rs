@@ -39,6 +39,10 @@ pub trait DatapathOps {
     /// How should libccp communicate with the CCP congestion control algorithm?
     /// An `impl Datapath` should contain some IPC strategy, and transmit `msg` via that.
     fn send_msg(&mut self, msg: &[u8]);
+
+    /// How should libccp log messages?
+    /// By default, silently drop them.
+    fn log(&self, _level: ccp::ccp_log_level, _msg: &str) {}
 }
 
 struct DatapathObj(Box<DatapathOps>);
@@ -55,12 +59,13 @@ impl Datapath {
         let mut dp = ccp::ccp_datapath {
             set_cwnd: Some(ccp::set_cwnd),
             set_rate_abs: Some(ccp::set_rate_abs),
-            set_rate_rel: Some(ccp::set_rate_rel),
             time_zero: time::precise_time_ns(),
             now: Some(ccp::now),
             since_usecs: Some(ccp::since_usecs),
             after_usecs: Some(ccp::after_usecs),
             send_msg: Some(ccp::send_msg),
+            log: Some(ccp::log),
+            state: std::ptr::null_mut(),
             impl_: Box::into_raw(dp) as *mut std::os::raw::c_void,
         };
 
