@@ -11,7 +11,7 @@ impl Default for FlowInfo {
             src_port: 0,
             dst_ip: 0,
             dst_port: 0,
-            congAlg: [0i8; 64],
+            congAlg: [0; 64],
         })
     }
 }
