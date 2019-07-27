@@ -31,7 +31,12 @@ pub extern "C" fn send_msg(
 }
 
 #[no_mangle]
-pub extern "C" fn log(dp: *mut ccp_datapath, level: ccp_log_level, msg: *const i8, len: i32) {
+pub extern "C" fn log(
+    dp: *mut ccp_datapath,
+    level: ccp_log_level,
+    msg: *const std::os::raw::c_char,
+    len: i32,
+) {
     // get the impl CcpDatapath
     let mut dp: Box<DatapathObj> = unsafe {
         use std::mem;
