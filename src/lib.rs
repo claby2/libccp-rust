@@ -45,7 +45,7 @@ pub trait DatapathOps {
     fn log(&self, _level: ccp::ccp_log_level, _msg: &str) {}
 }
 
-struct DatapathObj(Box<DatapathOps>);
+struct DatapathObj(Box<dyn DatapathOps>);
 
 /// Represents datapath functionality.
 /// libccp state is freed when this is dropped.
@@ -130,7 +130,7 @@ pub trait CongestionOps {
     fn set_rate_abs(&mut self, rate: u32);
 }
 
-impl CongestionOps {
+impl dyn CongestionOps {
     fn downcast<T: CongestionOps>(&self) -> &T {
         unsafe { &*(self as *const Self as *const T) }
     }
