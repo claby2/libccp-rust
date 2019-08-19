@@ -1,6 +1,6 @@
 [package]
 name = "libccp"
-version = "0.0.10"
+version = "0.0.11"
 authors = ["Akshay Narayan <akshayn@mit.edu>"]
 description = "Rust bindings for libccp, a library for implementing CCP-compatible datapaths"
 homepage = "https://ccp-project.github.io"
@@ -12,7 +12,7 @@ edition = "2018"
 
 [dependencies]
 failure = "0.1"
-mashup = "0.1"
+paste = "0.1"
 time = "0.1"
 
 [build-dependencies]

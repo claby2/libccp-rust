@@ -5,14 +5,6 @@
 //! `Datapath` implements not specific to a single connection.
 //! `CongestionOps` implements connection-level events.
 
-// Made necessary by use of `mashup!`.
-// https://github.com/dtolnay/mashup/issues/19
-// Need +22 recursion_limit per struct field.
-// The longest struct in this crate is `Primitives` with 15 fields, so
-// we need recursion_limit >= 330 + some large constant.
-// So we pick 512.
-#![recursion_limit = "512"]
-
 /// Bindgen-generated libccp bindings.
 #[allow(non_upper_case_globals)]
 #[allow(non_camel_case_types)]
@@ -22,8 +14,6 @@ mod ccp;
 
 extern crate failure;
 use failure::bail;
-#[macro_use]
-extern crate mashup;
 extern crate time;
 
 /// Datapath-wide functionality.
@@ -144,12 +134,8 @@ struct ConnectionObj(Box<dyn CongestionOps>);
 
 macro_rules! setters {
     ( $s:ident => $($x: ident : $t: ty),+ ) => {
-        mashup! { $(
-            m["fname" $x] = with_ $x;
-        )* }
-
-        m! { impl $s { $(
-            pub fn "fname" $x (mut self, val: $t) -> Self { (self.0).$x = val; self }
+        paste::item! { impl $s { $(
+            pub fn [<with_ $x>] (mut self, val: $t) -> Self { (self.0).$x = val; self }
         )*
 	} }
     };
