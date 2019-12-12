@@ -5,15 +5,14 @@ use super::DatapathObj;
 
 #[no_mangle]
 pub extern "C" fn send_msg(
-    dp: *mut ccp_datapath,
-    _conn: *mut ccp_connection,
+    conn: *mut ccp_connection,
     msg: *mut ::std::os::raw::c_char,
     msg_size: ::std::os::raw::c_int,
 ) -> std::os::raw::c_int {
     // get the impl CcpDatapath
     let mut dp: Box<DatapathObj> = unsafe {
         use std::mem;
-        let dp = mem::transmute((*dp).impl_);
+        let dp = mem::transmute((*(*conn).datapath).impl_);
         Box::from_raw(dp)
     };
 
@@ -64,7 +63,7 @@ pub extern "C" fn log(
 use super::ConnectionObj;
 
 #[no_mangle]
-pub extern "C" fn set_cwnd(_dp: *mut ccp_datapath, conn: *mut ccp_connection, cwnd: u32) {
+pub extern "C" fn set_cwnd(conn: *mut ccp_connection, cwnd: u32) {
     // get the impl ConnectionObj
     let mut conn: Box<ConnectionObj> = unsafe {
         use std::mem;
@@ -79,7 +78,7 @@ pub extern "C" fn set_cwnd(_dp: *mut ccp_datapath, conn: *mut ccp_connection, cw
 }
 
 #[no_mangle]
-pub extern "C" fn set_rate_abs(_dp: *mut ccp_datapath, conn: *mut ccp_connection, rate: u32) {
+pub extern "C" fn set_rate_abs(conn: *mut ccp_connection, rate: u32) {
     // get the impl ConnectionObj
     let mut conn: Box<ConnectionObj> = unsafe {
         use std::mem;

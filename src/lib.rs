@@ -15,6 +15,7 @@ mod ccp;
 extern crate failure;
 use failure::bail;
 extern crate time;
+use std::sync::{Arc, Mutex};
 
 /// Datapath-wide functionality.
 /// ```
@@ -39,13 +40,17 @@ struct DatapathObj(Box<dyn DatapathOps>);
 
 /// Represents datapath functionality.
 /// libccp state is freed when this is dropped.
-pub struct Datapath(i8);
+pub struct Datapath(ccp::ccp_datapath);
+
+unsafe impl Send for Datapath {}
+unsafe impl Sync for Datapath {}
 
 impl Datapath {
     /// Initialize libccp and pass it an implementation of `Datapath` functionality.
     pub fn init<T: DatapathOps + 'static>(dp: T) -> Result<Self, failure::Error> {
         // need 2 levels of Box so we can avoid passing a fat pointer down
         let dp = Box::new(DatapathObj(Box::new(dp)));
+        let conn_array = unsafe { libc::malloc(1024 * std::mem::size_of::<ccp::ccp_connection>()) };
         let mut dp = ccp::ccp_datapath {
             set_cwnd: Some(ccp::set_cwnd),
             set_rate_abs: Some(ccp::set_rate_abs),
@@ -55,7 +60,10 @@ impl Datapath {
             after_usecs: Some(ccp::after_usecs),
             send_msg: Some(ccp::send_msg),
             log: Some(ccp::log),
-            state: std::ptr::null_mut(),
+            max_connections: 1024,
+            max_programs: 10,
+            programs: std::ptr::null_mut(),
+            ccp_active_connections: conn_array as *mut ccp::ccp_connection,
             impl_: Box::into_raw(dp) as *mut std::os::raw::c_void,
         };
 
@@ -69,15 +77,17 @@ impl Datapath {
             _ => unreachable!(), // because rust can't figure out that (i < -5 | -5 | -4 | -3 | -2 | -1 | i >= 0) is exhaustive
         };
 
-        Ok(Datapath(0))
+        Ok(Datapath(dp))
     }
 
     /// When the datapath receives an IPC message from the congestion
     /// control algorithm, call this function to tell libccp about it.
     pub fn recv_msg(&self, msg: &mut [u8]) -> Result<(), failure::Error> {
+        let dp = &self.0;
         let buf_len = msg.len();
         let ok = unsafe {
             ccp::ccp_read_msg(
+                dp as *const ccp::ccp_datapath as *mut ccp::ccp_datapath,
                 msg.as_mut_ptr() as *mut std::os::raw::c_char,
                 buf_len as i32,
             )
@@ -93,7 +103,8 @@ impl Datapath {
 
 impl Drop for Datapath {
     fn drop(&mut self) {
-        unsafe { ccp::ccp_free() }
+        let dp = &mut self.0;
+        unsafe { ccp::ccp_free(dp as *mut ccp::ccp_datapath) }
     }
 }
 
@@ -171,7 +182,7 @@ pub use crate::primitives::Primitives;
 /// }
 /// ```
 pub struct Connection<'dp, T: CongestionOps + 'static>(
-    *mut ccp::ccp_connection,
+    Arc<Mutex<*mut ccp::ccp_connection>>,
     Box<ConnectionObj>,
     &'dp Datapath,
     std::marker::PhantomData<T>,
@@ -187,15 +198,13 @@ impl<'dp, T: CongestionOps + 'static> Connection<'dp, T> {
         conn: T,
         flow_info: FlowInfo,
     ) -> Result<Self, failure::Error> {
-        if token.0 != 0 {
-            unreachable!();
-        }
-
         let conn_obj = Box::new(ConnectionObj(Box::new(conn) as Box<dyn CongestionOps>));
         let ops_raw_pointer = Box::into_raw(conn_obj);
         let conn_obj = unsafe { Box::from_raw(ops_raw_pointer.clone()) };
+        let dp = &token.0;
         let conn = unsafe {
             ccp::ccp_connection_start(
+                dp as *const ccp::ccp_datapath as *mut ccp::ccp_datapath,
                 Box::into_raw(conn_obj) as *mut std::os::raw::c_void,
                 &mut flow_info.get_dp_info(),
             )
@@ -206,7 +215,7 @@ impl<'dp, T: CongestionOps + 'static> Connection<'dp, T> {
         }
 
         Ok(Connection(
-            conn,
+            Arc::new(Mutex::new(conn)),
             unsafe { Box::from_raw(ops_raw_pointer) },
             token,
             Default::default(),
@@ -215,13 +224,15 @@ impl<'dp, T: CongestionOps + 'static> Connection<'dp, T> {
 
     /// Inform libccp of new measurements.
     pub fn load_primitives(&mut self, prims: Primitives) {
+        let mut ptr = self.0.lock().expect("Lock ccp_connection");
         unsafe {
-            (*(self.0)).prims = prims.0;
+            (**ptr).prims = prims.0;
         }
     }
 
     pub fn primitives(&self, _token: &Datapath) -> Primitives {
-        let pr = unsafe { &(*(self.0)).prims };
+        let ptr = self.0.lock().expect("Lock ccp_connection");
+        let pr = unsafe { &(**ptr).prims };
         pr.into()
     }
 
@@ -230,7 +241,8 @@ impl<'dp, T: CongestionOps + 'static> Connection<'dp, T> {
     /// Therefore, ensure that when you call this function, you are not holding locks that
     /// the `CongestionOps` functionality tries to acquire - this will deadlock.
     pub fn invoke(&mut self) -> Result<(), failure::Error> {
-        let ok = unsafe { ccp::ccp_invoke(self.0) };
+        let ptr = self.0.lock().expect("Lock ccp_connection");
+        let ok = unsafe { ccp::ccp_invoke(*ptr) };
 
         if ok < 0 {
             bail!("CCP Invoke error: {:?}", ok);
@@ -244,9 +256,11 @@ unsafe impl<'dp, T: CongestionOps> Send for Connection<'dp, T> {}
 
 impl<'dp, T: CongestionOps> Drop for Connection<'dp, T> {
     fn drop(&mut self) {
+        let ptr = self.0.lock().expect("Lock ccp_connection");
         unsafe {
-            let index = (*(self.0)).index;
-            ccp::ccp_connection_free(index);
+            let index = (**ptr).index;
+            let dp = (**ptr).datapath;
+            ccp::ccp_connection_free(dp, index);
         }
     }
 }
