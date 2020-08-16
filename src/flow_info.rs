@@ -16,7 +16,7 @@ impl Default for FlowInfo {
     }
 }
 
-setters!(FlowInfo => 
+setters!(FlowInfo =>
     init_cwnd: u32,
     mss: u32,
     src_ip: u32,

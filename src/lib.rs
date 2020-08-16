@@ -12,9 +12,6 @@
 #[allow(unused)]
 mod ccp;
 
-extern crate failure;
-use failure::bail;
-extern crate time;
 use std::sync::{Arc, Mutex};
 
 /// Datapath-wide functionality.
@@ -47,7 +44,7 @@ unsafe impl Sync for Datapath {}
 
 impl Datapath {
     /// Initialize libccp and pass it an implementation of `Datapath` functionality.
-    pub fn init<T: DatapathOps + 'static>(dp: T) -> Result<Self, failure::Error> {
+    pub fn init<T: DatapathOps + 'static>(dp: T) -> Result<Self, LibccpError> {
         // need 2 levels of Box so we can avoid passing a fat pointer down
         let dp = Box::new(DatapathObj(Box::new(dp)));
         let conn_array = unsafe { libc::malloc(1024 * std::mem::size_of::<ccp::ccp_connection>()) };
@@ -64,25 +61,21 @@ impl Datapath {
             max_programs: 10,
             programs: std::ptr::null_mut(),
             ccp_active_connections: conn_array as *mut ccp::ccp_connection,
+            fto_us: 1000,
+            last_msg_sent: 0,
+            _in_fallback: false,
             impl_: Box::into_raw(dp) as *mut std::os::raw::c_void,
         };
 
         let ok = unsafe { ccp::ccp_init(&mut dp) };
-        match ok {
-            i if i >= 0 => (),    // ok
-            -1 => unreachable!(), // ccp_init checks that we didn't pass null function pointers in with `dp`, but we didn't
-            -2 => bail!("Cannot initialize libccp twice"),
-            -3 | -4 | -5 => bail!("Could not alloc"),
-            i if i < -5 => unreachable!(), // ccp_init only returns error codes -1 | -2 | -3 | -4 | -5
-            _ => unreachable!(), // because rust can't figure out that (i < -5 | -5 | -4 | -3 | -2 | -1 | i >= 0) is exhaustive
-        };
-
-        Ok(Datapath(dp))
+        let e: LibccpError = ok.into();
+        let e: Result<(), LibccpError> = e.into();
+        e.map(|_| Datapath(dp))
     }
 
     /// When the datapath receives an IPC message from the congestion
     /// control algorithm, call this function to tell libccp about it.
-    pub fn recv_msg(&self, msg: &mut [u8]) -> Result<(), failure::Error> {
+    pub fn recv_msg(&self, msg: &mut [u8]) -> Result<(), LibccpError> {
         let dp = &self.0;
         let buf_len = msg.len();
         let ok = unsafe {
@@ -93,11 +86,8 @@ impl Datapath {
             )
         };
 
-        if ok < 0 {
-            bail!("ccp_read_msg failed with {:?}", ok);
-        }
-
-        Ok(())
+        let e: LibccpError = ok.into();
+        e.into()
     }
 }
 
@@ -193,11 +183,7 @@ impl<'dp, T: CongestionOps + 'static> Connection<'dp, T> {
     /// `conn: impl CongestionOps` represents per-connection state,
     /// and how to mutate it in response to changing congestion windows
     /// or rates.
-    pub fn start(
-        token: &'dp Datapath,
-        conn: T,
-        flow_info: FlowInfo,
-    ) -> Result<Self, failure::Error> {
+    pub fn start(token: &'dp Datapath, conn: T, flow_info: FlowInfo) -> Result<Self, LibccpError> {
         let conn_obj = Box::new(ConnectionObj(Box::new(conn) as Box<dyn CongestionOps>));
         let ops_raw_pointer = Box::into_raw(conn_obj);
         let conn_obj = unsafe { Box::from_raw(ops_raw_pointer.clone()) };
@@ -211,7 +197,7 @@ impl<'dp, T: CongestionOps + 'static> Connection<'dp, T> {
         };
 
         if conn.is_null() {
-            bail!("Could not initialize connection");
+            return Err(LibccpError::OtherError("Could not initialize connection"));
         }
 
         Ok(Connection(
@@ -240,15 +226,12 @@ impl<'dp, T: CongestionOps + 'static> Connection<'dp, T> {
     /// and potentially result in calls to the `CongestionOps` callbacks.
     /// Therefore, ensure that when you call this function, you are not holding locks that
     /// the `CongestionOps` functionality tries to acquire - this will deadlock.
-    pub fn invoke(&mut self) -> Result<(), failure::Error> {
+    pub fn invoke(&mut self) -> Result<(), LibccpError> {
         let ptr = self.0.lock().expect("Lock ccp_connection");
         let ok = unsafe { ccp::ccp_invoke(*ptr) };
 
-        if ok < 0 {
-            bail!("CCP Invoke error: {:?}", ok);
-        }
-
-        Ok(())
+        let e: LibccpError = ok.into();
+        e.into()
     }
 }
 
@@ -279,6 +262,141 @@ impl<'dp, T: CongestionOps> std::ops::DerefMut for Connection<'dp, T> {
         y.0.downcast_mut::<T>()
     }
 }
+
+#[derive(Clone, Debug)]
+pub enum LibccpError {
+    OtherError(&'static str),
+    LibccpOk,
+    LibccpMissingArg,
+    LibccpNullArg,
+    LibccpBufsizeNegative,
+    LibccpBufsizeTooSmall,
+    LibccpMsgTooLong,
+    LibccpWriteInvalidHeaderType,
+    LibccpReadInvalidHeaderType,
+    LibccpReadInvalidOp,
+    LibccpReadRegNotAllowed,
+    LibccpReadInvalidReturnReg,
+    LibccpReadInvalidLeftReg,
+    LibccpReadInvalidRightReg,
+    LibccpInstallTypeMismatch,
+    LibccpInstallTooManyExpr,
+    LibccpInstallTooManyInstr,
+    LibccpUpdateTypeMismatch,
+    LibccpUpdateTooMany,
+    LibccpUpdateInvalidRegType,
+    LibccpChangeTypeMismatch,
+    LibccpChangeTooMany,
+    LibccpUnknownConnection,
+    LibccpCreatePending,
+    LibccpConnectionNotInitialized,
+    LibccpProgTableFull,
+    LibccpProgNotFound,
+    LibccpAddIntOverflow,
+    LibccpDivByZero,
+    LibccpMulIntOverflow,
+    LibccpSubIntUnderflow,
+    LibccpPrivIsNull,
+    LibccpProgIsNull,
+    LibccpFallbackTimedOut,
+}
+
+impl From<i32> for LibccpError {
+    fn from(e: i32) -> Self {
+        match e {
+            x if x == ccp::LIBCCP_OK as _ => LibccpError::LibccpOk,
+            ccp::LIBCCP_MISSING_ARG => LibccpError::LibccpMissingArg,
+            ccp::LIBCCP_NULL_ARG => LibccpError::LibccpNullArg,
+            ccp::LIBCCP_BUFSIZE_NEGATIVE => LibccpError::LibccpBufsizeNegative,
+            ccp::LIBCCP_BUFSIZE_TOO_SMALL => LibccpError::LibccpBufsizeTooSmall,
+            ccp::LIBCCP_MSG_TOO_LONG => LibccpError::LibccpMsgTooLong,
+            ccp::LIBCCP_WRITE_INVALID_HEADER_TYPE => LibccpError::LibccpWriteInvalidHeaderType,
+            ccp::LIBCCP_READ_INVALID_HEADER_TYPE => LibccpError::LibccpReadInvalidHeaderType,
+            ccp::LIBCCP_READ_INVALID_OP => LibccpError::LibccpReadInvalidOp,
+            ccp::LIBCCP_READ_REG_NOT_ALLOWED => LibccpError::LibccpReadRegNotAllowed,
+            ccp::LIBCCP_READ_INVALID_RETURN_REG => LibccpError::LibccpReadInvalidReturnReg,
+            ccp::LIBCCP_READ_INVALID_LEFT_REG => LibccpError::LibccpReadInvalidLeftReg,
+            ccp::LIBCCP_READ_INVALID_RIGHT_REG => LibccpError::LibccpReadInvalidRightReg,
+            ccp::LIBCCP_INSTALL_TYPE_MISMATCH => LibccpError::LibccpInstallTypeMismatch,
+            ccp::LIBCCP_INSTALL_TOO_MANY_EXPR => LibccpError::LibccpInstallTooManyExpr,
+            ccp::LIBCCP_INSTALL_TOO_MANY_INSTR => LibccpError::LibccpInstallTooManyInstr,
+            ccp::LIBCCP_UPDATE_TYPE_MISMATCH => LibccpError::LibccpUpdateTypeMismatch,
+            ccp::LIBCCP_UPDATE_TOO_MANY => LibccpError::LibccpUpdateTooMany,
+            ccp::LIBCCP_UPDATE_INVALID_REG_TYPE => LibccpError::LibccpUpdateInvalidRegType,
+            ccp::LIBCCP_CHANGE_TYPE_MISMATCH => LibccpError::LibccpChangeTypeMismatch,
+            ccp::LIBCCP_CHANGE_TOO_MANY => LibccpError::LibccpChangeTooMany,
+            ccp::LIBCCP_UNKNOWN_CONNECTION => LibccpError::LibccpUnknownConnection,
+            ccp::LIBCCP_CREATE_PENDING => LibccpError::LibccpCreatePending,
+            ccp::LIBCCP_CONNECTION_NOT_INITIALIZED => LibccpError::LibccpConnectionNotInitialized,
+            ccp::LIBCCP_PROG_TABLE_FULL => LibccpError::LibccpProgTableFull,
+            ccp::LIBCCP_PROG_NOT_FOUND => LibccpError::LibccpProgNotFound,
+            ccp::LIBCCP_ADD_INT_OVERFLOW => LibccpError::LibccpAddIntOverflow,
+            ccp::LIBCCP_DIV_BY_ZERO => LibccpError::LibccpDivByZero,
+            ccp::LIBCCP_MUL_INT_OVERFLOW => LibccpError::LibccpMulIntOverflow,
+            ccp::LIBCCP_SUB_INT_UNDERFLOW => LibccpError::LibccpSubIntUnderflow,
+            ccp::LIBCCP_PRIV_IS_NULL => LibccpError::LibccpPrivIsNull,
+            ccp::LIBCCP_PROG_IS_NULL => LibccpError::LibccpProgIsNull,
+            ccp::LIBCCP_FALLBACK_TIMED_OUT => LibccpError::LibccpFallbackTimedOut,
+            _ => LibccpError::OtherError("unknown error code"),
+        }
+    }
+}
+
+impl Into<Result<(), Self>> for LibccpError {
+    fn into(self) -> Result<(), Self> {
+        match self {
+            LibccpError::LibccpOk => Ok(()),
+            x => Err(x),
+        }
+    }
+}
+
+impl std::fmt::Display for LibccpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        match self {
+            LibccpError::OtherError(msg) => write!(f, "{}", msg),
+            LibccpError::LibccpOk => write!(f, "Ok."),
+            LibccpError::LibccpMissingArg => write!(f, "Missing Argument"),
+            LibccpError::LibccpNullArg => write!(f, "Null Argument"),
+            LibccpError::LibccpBufsizeNegative => write!(f, "Provided buffer size was negative"),
+            LibccpError::LibccpBufsizeTooSmall => write!(f, "Provided buffer size was too small"),
+            LibccpError::LibccpMsgTooLong => write!(f, "Message too long"),
+            LibccpError::LibccpWriteInvalidHeaderType => {
+                write!(f, "Tried to write invalid header type")
+            }
+            LibccpError::LibccpReadInvalidHeaderType => {
+                write!(f, "Tried to read invalid header type")
+            }
+            LibccpError::LibccpReadInvalidOp => write!(f, "Read Invalid opcode"),
+            LibccpError::LibccpReadRegNotAllowed => write!(f, "Read register not allowed here"),
+            LibccpError::LibccpReadInvalidReturnReg => write!(f, "Invalid return register"),
+            LibccpError::LibccpReadInvalidLeftReg => write!(f, "Invalid lvalue"),
+            LibccpError::LibccpReadInvalidRightReg => write!(f, "Invalid rvalue"),
+            LibccpError::LibccpInstallTypeMismatch => write!(f, "Install: Type mismatch"),
+            LibccpError::LibccpInstallTooManyExpr => write!(f, "Install: Too many expressions"),
+            LibccpError::LibccpInstallTooManyInstr => write!(f, "Install: Too many instructions"),
+            LibccpError::LibccpUpdateTypeMismatch => write!(f, "Update: type mismatch"),
+            LibccpError::LibccpUpdateTooMany => write!(f, "Update: too many values"),
+            LibccpError::LibccpUpdateInvalidRegType => write!(f, "Update: invalid register type"),
+            LibccpError::LibccpChangeTypeMismatch => write!(f, "Change: type mismatch"),
+            LibccpError::LibccpChangeTooMany => write!(f, "Change: too many values"),
+            LibccpError::LibccpUnknownConnection => write!(f, "Unknown connection"),
+            LibccpError::LibccpCreatePending => write!(f, "Create was pending"),
+            LibccpError::LibccpConnectionNotInitialized => write!(f, "Connection not initialized"),
+            LibccpError::LibccpProgTableFull => write!(f, "Program table full"),
+            LibccpError::LibccpProgNotFound => write!(f, "Program not found"),
+            LibccpError::LibccpAddIntOverflow => write!(f, "Integer overflow (addition)"),
+            LibccpError::LibccpDivByZero => write!(f, "Divide by zero"),
+            LibccpError::LibccpMulIntOverflow => write!(f, "Integer overflow (multiplication)"),
+            LibccpError::LibccpSubIntUnderflow => write!(f, "Integer underflow (subtraction)"),
+            LibccpError::LibccpPrivIsNull => write!(f, "Private state is null"),
+            LibccpError::LibccpProgIsNull => write!(f, "Program is null"),
+            LibccpError::LibccpFallbackTimedOut => write!(f, "Fallback timed out"),
+        }
+    }
+}
+
+impl std::error::Error for LibccpError {}
 
 #[cfg(test)]
 mod tests {
@@ -428,7 +546,7 @@ mod tests {
         let prims_prog_uid = 5;
 
         #[rustfmt::skip]
-        let close = 
+        let close =
             Some(vec![ //  close msg
                 0x01, 0,
                 16, 0,
@@ -438,7 +556,7 @@ mod tests {
             ]);
 
         #[rustfmt::skip]
-        let report = 
+        let report =
             Some(vec![ // report msg
                 0x01, 0x00,                                     // type 
                 0x18, 0x00,                                     // len
@@ -449,7 +567,7 @@ mod tests {
             ]);
 
         #[rustfmt::skip]
-        let create = 
+        let create =
             Some(vec![ // create msg
                 0x00,0x00,
                 0x20,0x00,

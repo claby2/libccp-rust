@@ -50,6 +50,7 @@ fn main() {
     let bindings = bindgen::Builder::default()
         .header("./libccp/ccp.h")
         .whitelist_function(r#"ccp_\w+"#)
+        .whitelist_var(r#"LIBCCP_\w+"#)
         .blacklist_type(r#"u\d+"#)
         .rustfmt_bindings(true)
         .generate()
