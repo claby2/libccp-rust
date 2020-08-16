@@ -11,7 +11,6 @@ license = "ISC"
 edition = "2018"
 
 [dependencies]
-failure = "0.1"
 paste = "0.1"
 time = "0.1"
 libc = "0.2"
