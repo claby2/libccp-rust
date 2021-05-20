@@ -265,7 +265,7 @@ impl<'dp, T: CongestionOps> std::ops::DerefMut for Connection<'dp, T> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum LibccpError {
     OtherError(&'static str),
     LibccpOk,
@@ -420,6 +420,7 @@ mod tests {
                 "this message: {:?}, remaining messsages: {:?}",
                 expected_send_msg, self.expected_msgs
             );
+            println!("got msg: {:?}", msg);
             assert_eq!(msg, &expected_send_msg[..msg.len()]);
         }
     }
@@ -474,6 +475,20 @@ mod tests {
         let prims_prog_uid = 5;
 
         #[rustfmt::skip]
+        let mut crmsg = vec![ // create msg
+                0x00,0x00,
+                0x60,0x00,
+                0x01,0x00,0x00,0x00,
+                0x64,0x00,0x00,0x00,
+                0x0a,0x00,0x00,0x00,
+                0x01,0x00,0x00,0x00,
+                0x02,0x00,0x00,0x00,
+                0x03,0x00,0x00,0x00,
+                0x04,0x00,0x00,0x00,
+            ];
+        crmsg.extend(&[0u8; 64]);
+
+        #[rustfmt::skip]
         let dp = make_dp(vec![
             Some(vec![ //  close msg
                 0x01, 0,
@@ -490,17 +505,7 @@ mod tests {
                 0x01, 0x00, 0x00, 0x00,                         // num_fields
                 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // fields
             ]),
-            Some(vec![ // create msg
-                0x00,0x00,
-                0x20,0x00,
-                0x01,0x00,0x00,0x00,
-                0x64,0x00,0x00,0x00,
-                0x0a,0x00,0x00,0x00,
-                0x01,0x00,0x00,0x00,
-                0x02,0x00,0x00,0x00,
-                0x03,0x00,0x00,0x00,
-                0x04,0x00,0x00,0x00,
-            ]),
+            Some(crmsg),
         ]);
 
         let mut c = make_conn(&dp);
@@ -569,10 +574,10 @@ mod tests {
             ]);
 
         #[rustfmt::skip]
-        let create =
+        let mut create =
             Some(vec![ // create msg
                 0x00,0x00,
-                0x20,0x00,
+                0x60,0x00,
                 0x01,0x00,0x00,0x00,
                 0x64,0x00,0x00,0x00,
                 0x0a,0x00,0x00,0x00,
@@ -581,6 +586,7 @@ mod tests {
                 0x03,0x00,0x00,0x00,
                 0x04,0x00,0x00,0x00,
             ]);
+        create.as_mut().unwrap().extend(&[0u8; 64]);
 
         let mut msgs = vec![close];
 
@@ -641,6 +647,20 @@ mod tests {
         let basic_prog_uid = 4;
 
         #[rustfmt::skip]
+        let mut crmsg = vec![ // create msg
+                0x00,0x00,
+                0x60,0x00,
+                0x01,0x00,0x00,0x00,
+                0x64,0x00,0x00,0x00,
+                0x0a,0x00,0x00,0x00,
+                0x01,0x00,0x00,0x00,
+                0x02,0x00,0x00,0x00,
+                0x03,0x00,0x00,0x00,
+                0x04,0x00,0x00,0x00,
+            ];
+        crmsg.extend(&[0u8; 64]);
+
+        #[rustfmt::skip]
         let dp = make_dp(vec![
             Some(vec![ //  close msg
                 0x01, 0,
@@ -657,17 +677,7 @@ mod tests {
                 0x01, 0x00, 0x00, 0x00,                         // num_fields
                 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // fields
             ]),
-            Some(vec![ // create msg
-                0x00,0x00,
-                0x20,0x00,
-                0x01,0x00,0x00,0x00,
-                0x64,0x00,0x00,0x00,
-                0x0a,0x00,0x00,0x00,
-                0x01,0x00,0x00,0x00,
-                0x02,0x00,0x00,0x00,
-                0x03,0x00,0x00,0x00,
-                0x04,0x00,0x00,0x00,
-            ]),
+            Some(crmsg),
         ]);
 
         let mut c = make_conn(&dp);

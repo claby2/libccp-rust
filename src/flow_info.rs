@@ -1,4 +1,4 @@
-use super::ccp;
+use super::{ccp, LibccpError};
 
 pub struct FlowInfo(ccp::ccp_datapath_info);
 
@@ -33,15 +33,23 @@ impl FlowInfo {
             .with_dst_port(dst_port)
     }
 
-    pub(crate) fn get_dp_info(&self) -> ccp::ccp_datapath_info {
-        ccp::ccp_datapath_info {
-            init_cwnd: self.0.init_cwnd,
-            mss: self.0.mss,
-            src_ip: self.0.src_ip,
-            src_port: self.0.src_port,
-            dst_ip: self.0.dst_ip,
-            dst_port: self.0.dst_port,
-            congAlg: self.0.congAlg,
+    /// Request a congestion control algorithm to use.
+    ///
+    /// CCP is free to ignore this value. The maximum string length allowed is 63.
+    pub fn with_cong_alg(mut self, name: &str) -> Result<Self, LibccpError> {
+        if name.len() > 63 {
+            return Err(LibccpError::OtherError(
+                "Name of congestion control alg too long. Max length is 63.",
+            ));
         }
+
+        // safety: i8 and u8 are the same size.
+        let name_c = unsafe { &*(name.as_bytes() as *const [u8] as *const [i8]) };
+        self.0.congAlg[0..name_c.len()].copy_from_slice(name_c);
+        Ok(self)
+    }
+
+    pub(crate) fn get_dp_info(&self) -> ccp::ccp_datapath_info {
+        self.0
     }
 }
