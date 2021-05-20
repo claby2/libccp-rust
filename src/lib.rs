@@ -121,6 +121,8 @@ pub trait CongestionOps {
     fn set_rate_abs(&mut self, rate: u32);
 }
 
+// safety: these methods are non-public, and Connection remembers the right `T` as its type
+// parameter.
 impl dyn CongestionOps {
     fn downcast<T: CongestionOps>(&self) -> &T {
         unsafe { &*(self as *const Self as *const T) }
