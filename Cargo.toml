@@ -16,7 +16,7 @@ time = "0.1"
 libc = "0.2"
 
 [build-dependencies]
-bindgen = "0.47.0"
+bindgen = "0.58"
 
 [dev-dependencies]
 lazy_static = "1"
