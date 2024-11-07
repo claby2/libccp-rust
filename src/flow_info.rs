@@ -44,7 +44,7 @@ impl FlowInfo {
         }
 
         // safety: i8 and u8 are the same size.
-        let name_c = unsafe { &*(name.as_bytes() as *const [u8] as *const [i8]) };
+        let name_c = unsafe { &*(name.as_bytes() as *const [u8]) };
         self.0.congAlg[0..name_c.len()].copy_from_slice(name_c);
         Ok(self)
     }
